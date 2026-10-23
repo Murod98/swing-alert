@@ -1,0 +1,14 @@
+{
+ "alerted": [
+  "USDCAD|D1|FVG|bull|2026-09-17 00:00:00",
+  "USDCAD|D1|FVG|bull|2026-09-18 00:00:00"
+ ],
+ "trend": {
+  "NAS100": "buy",
+  "XAUUSD": "sell",
+  "EURUSD": "sell",
+  "GBPUSD": "sell",
+  "USDCAD": "buy",
+  "USDJPY": "sell"
+ }
+}
