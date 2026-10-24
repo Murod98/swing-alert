@@ -1,10 +1,6 @@
 name: swing-alert
 
 on:
-  schedule:
-    # Shanba va yakshanba o'tkazib yuboriladi (Actions daqiqalari tejaladi). Vaqt UTC.
-    - cron: "*/10 * * * 1-4"       # Dushanba - Payshanba: kun bo'yi
-    - cron: "*/10 0-21 * * 5"      # Juma: bozor yopilguncha (22:00 UTC)
   workflow_dispatch:
 
 permissions:
