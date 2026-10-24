@@ -10,5 +10,20 @@
   "GBPUSD": "sell",
   "USDCAD": "buy",
   "USDJPY": "sell"
- }
+ },
+ "pending": [],
+ "fails": {
+  "NAS100": 0,
+  "XAUUSD": 0,
+  "EURUSD": 0,
+  "GBPUSD": 0,
+  "USDCAD": 0,
+  "USDJPY": 0
+ },
+ "news": {
+  "fetched": "2026-10-24T18:34:11.034705+00:00",
+  "events": []
+ },
+ "news_sent": [],
+ "hb": "2026-10-24"
 }
