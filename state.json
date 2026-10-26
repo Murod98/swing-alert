@@ -21,8 +21,19 @@
   "USDJPY": 0
  },
  "news": {
-  "fetched": "2026-10-24T18:34:11.034705+00:00",
-  "events": []
+  "fetched": "2026-10-26T00:01:34.786172+00:00",
+  "events": [
+   {
+    "kind": "FOMC",
+    "title": "Federal Funds Rate",
+    "t": "2026-10-28T18:00:00+00:00"
+   },
+   {
+    "kind": "FOMC",
+    "title": "FOMC Press Conference",
+    "t": "2026-10-28T18:30:00+00:00"
+   }
+  ]
  },
  "news_sent": [],
  "hb": "2026-10-24"
