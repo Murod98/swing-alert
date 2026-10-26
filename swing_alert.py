@@ -48,7 +48,9 @@ MAX_KEYS = 2000
 ZONE_MAX_AGE_DAYS = {"D1": 60, "H4": 30}
 
 # --- MSS tasdig'i ---
-CONFIRM_TFS = ("M30", "H1")                 # shu ikkisidan qaysi biri birinchi tasdiqlasa
+CONFIRM_TFS = ("H1",)                       # M30 shovqinli; ikkalasi uchun: ("M30", "H1")
+MIN_DEPTH = 0.5                             # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
+STOP_BUFFER_ATR = 0.3                       # stop darajasi uchun ATR buferi
 LTF_SWING_SIDE = 2                          # kichik fractal: bir tomondan 2 sham
 LTF_LOOKBACK = 40                           # sweep dan oldin necha sham ichida swing qidiriladi
 PENDING_DAYS = {"D1": 7, "H4": 3}           # tasdiq necha kun kutiladi
@@ -295,7 +297,11 @@ def check_mss(df, p):
     s = int(pos[0])
     bull = p["kind"] == "bull"
     seg = df.iloc[s:]
-    touch = (seg.l <= p["hi"]).values if bull else (seg.h >= p["lo"]).values
+    width = p["hi"] - p["lo"]
+    if bull:   # narx tepadan tushadi: zonaning MIN_DEPTH qismigacha kirishi kerak
+        touch = (seg.l <= p["hi"] - MIN_DEPTH * width).values
+    else:
+        touch = (seg.h >= p["lo"] + MIN_DEPTH * width).values
     if not touch.any():
         return None
     first = s + int(np.argmax(touch))
@@ -315,7 +321,8 @@ def check_mss(df, p):
     if not hit.any():
         return None
     m = L + 1 + int(np.argmax(hit))
-    return dict(ref=ref, ref_k=rk, L=L, m=m,
+    atr = float((df.h - df.l).rolling(ATR_LEN).mean().iloc[m])
+    return dict(ref=ref, ref_k=rk, L=L, m=m, atr=atr,
                 sweep=float(df.l.iloc[L] if bull else df.h.iloc[L]),
                 close=float(df.c.iloc[m]), ts=df.index[m])
 
@@ -555,12 +562,32 @@ def process_pending(state, sym, ticker, now, d1c, h4c, h1c, events):
             side = "Bullish" if bull else "Bearish"
             lvl = "yuqori" if bull else "pastki"
             sweep_name = "Sweep low" if bull else "Sweep high"
+            width = (p["hi"] - p["lo"]) or 1e-9
+            atr = res["atr"] if res["atr"] == res["atr"] else 0.0   # nan -> 0
+            buf = STOP_BUFFER_ATR * atr
+            if bull:
+                depth = (p["hi"] - min(res["sweep"], p["hi"])) / width
+                far, inside = p["lo"], res["sweep"] > p["lo"]
+                st_sweep, st_zone = res["sweep"] - buf, far - buf
+            else:
+                depth = (min(res["sweep"], p["hi"]) - p["lo"]) / width
+                far, inside = p["hi"], res["sweep"] < p["hi"]
+                st_sweep, st_zone = res["sweep"] + buf, far + buf
+            depth = max(0.0, min(1.0, depth))
+
+            def atr_txt(stop):
+                return f" ({abs(res['close'] - stop) / atr:.1f} ATR)" if atr else ""
+
             msg = (f"✅ TASDIQ | {icon} {sym} {p['tf']} {side} {p['what']}\n"
                    f"{name} da MSS: sham tanasi {fmt(sym, res['ref'])} ({lvl} swing) ni "
                    f"{'tepaga' if bull else 'pastga'} yopdi\n"
-                   f"Zona: {fmt(sym, p['lo'])} - {fmt(sym, p['hi'])}\n"
+                   f"Zona: {fmt(sym, p['lo'])} - {fmt(sym, p['hi'])} (to'lgan: {depth * 100:.0f}%)\n"
                    f"{sweep_name}: {fmt(sym, res['sweep'])}\n"
-                   f"Yopilish: {fmt(sym, res['close'])}")
+                   f"Yopilish: {fmt(sym, res['close'])}\n"
+                   f"Stop (sweep ortida): {fmt(sym, st_sweep)}{atr_txt(st_sweep)}\n"
+                   f"Stop (zona ortida): {fmt(sym, st_zone)}{atr_txt(st_zone)}")
+            if inside:
+                msg += "\n⚠️ Sweep zona ichida: zona to'liq to'lmagan, sweep stopi tez olinishi mumkin"
             msg += news_warn_line(news_near(events, now), now)
             chart = make_chart(
                 df.iloc[:res["m"] + 1 + 3] if res["m"] + 4 <= len(df) else df,
@@ -649,7 +676,8 @@ def run(state, now):
                                 f"{fmt(sym, star['lo'])} - {fmt(sym, star['hi'])}")
                     if TREND_FILTER and trend:
                         msg += f"\nD1 trend: {trend.upper()}"
-                    msg += f"\n⏳ Tasdiq: {'/'.join(CONFIRM_TFS)} da MSS kutilmoqda"
+                    msg += (f"\n⏳ Tasdiq: zona kamida {MIN_DEPTH * 100:.0f}% to'lgach "
+                            f"{'/'.join(CONFIRM_TFS)} da MSS kutilmoqda")
                     msg += news_warn_line(nw, now)
 
                     chart = make_chart(
@@ -682,9 +710,6 @@ def main():
     finally:
         save_state(state)   # xato bo'lsa ham state yo'qolmasin (takroriy alert bo'lmasin)
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
