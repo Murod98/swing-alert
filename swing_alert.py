@@ -35,12 +35,13 @@ PAIRS = {
     "USDJPY": "USDJPY=X",
 }
 
-TREND_FILTER = True    # True: buy trendda faqat bullish, sell trendda faqat bearish zonalar
+TREND_FILTER = False   # True: buy trendda faqat bullish, sell trendda faqat bearish zonalar; False: hamma zona, trendga qarshisi belgilanadi
 FRACTAL_SIDE = 5       # bir tomondan 5 sham (jami 11 sham), faqat D1 da
-MIN_FVG_ATR = 0.5      # FVG o'lchami ATR(14) ning kamida shuncha qismi
+MIN_FVG_ATR = 0.3      # FVG o'lchami ATR(14) ning kamida shuncha qismi
 ATR_LEN = 14
 OB_SEARCH = 8          # OB ni impulsdan necha sham orqaga qidirish
-H4_OFFSET = "0h"       # H4 sham chegarasi brokeringizga mos kelmasa: "1h", "2h", "3h"
+TV_SESSION = True      # True: D1 va H4 shamlari TradingView kabi (Nyu-York 17:00 da boshlanadi), H1 dan quriladi
+H1_PERIOD = "700d"     # H1 tarixi (Yahoo chegarasi 730 kun)
 STATE_FILE = "state.json"
 MAX_KEYS = 2000
 
@@ -48,12 +49,12 @@ MAX_KEYS = 2000
 
 # --- MSS tasdig'i ---
 CONFIRM_TFS = ("H1",)                       # M30 shovqinli; ikkalasi uchun: ("M30", "H1")
-MIN_DEPTH = {"W1": 0.0, "D1": 0.5, "H4": 0.5}  # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
+MIN_DEPTH = {"W1": 0.0, "D1": 0.3, "H4": 0.3}  # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
 STOP_BUFFER_ATR = 0.3                       # stop darajasi uchun ATR buferi
 LTF_SWING_SIDE = 2                          # kichik fractal: bir tomondan 2 sham
 LTF_LOOKBACK = 40                           # sweep dan oldin necha sham ichida swing qidiriladi
 PENDING_DAYS = {"W1": 14, "D1": 7, "H4": 3}
-CATCHUP_HOURS = 6   # bot o'tkazib yuborgan teginishni shuncha soat ichida kech bo'lsa ham xabar qiladi           # tasdiq necha kun kutiladi
+CATCHUP_HOURS = 24   # bot o'tkazib yuborgan teginishni shuncha soat ichida kech bo'lsa ham xabar qiladi           # tasdiq necha kun kutiladi
 
 # --- yangilik (faqat USD, High impact) ---
 NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -73,6 +74,8 @@ NEWS_BLOCK = False                          # True: yangilik oynasida zona alert
 HEARTBEAT_HOUR = 9                          # Toshkent vaqti bilan, kuniga bir marta
 DATA_FAIL_LIMIT = 6                         # ketma-ket shuncha marta ma'lumot kelmasa ogohlantirish
 TZ = ZoneInfo("Asia/Tashkent")
+NY = ZoneInfo("America/New_York")
+SESSION_SHIFT = pd.Timedelta(hours=7)       # NY 17:00 = kun boshi
 # =======================================================
 
 
@@ -194,8 +197,23 @@ def split_intraday(df, delta, now):
     return closed, (forming.iloc[-1] if len(forming) else None)
 
 
+def resample_tv(h1, rule):
+    """H1 (UTC) dan TradingView forex sessiyasi bo'yicha sham: NY 17:00 da boshlanadi
+    (yozda 21:00 UTC, qishda 22:00 UTC; DST o'zi hisobga olinadi).
+    rule="4h" -> NY 17,21,01,05,09,13; rule="1D" -> NY 17:00 dan 17:00 gacha."""
+    x = h1.copy()
+    x.index = h1.index.tz_convert(NY).tz_localize(None) + SESSION_SHIFT
+    out = x.resample(rule).agg(
+        {"o": "first", "h": "max", "l": "min", "c": "last"}).dropna()
+    out.index = (out.index - SESSION_SHIFT).tz_localize(
+        NY, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
+    return out
+
+
 def to_h4(h1):
-    return h1.resample("4h", offset=H4_OFFSET).agg(
+    if TV_SESSION:
+        return resample_tv(h1, "4h")
+    return h1.resample("4h").agg(
         {"o": "first", "h": "max", "l": "min", "c": "last"}).dropna()
 
 
@@ -662,13 +680,17 @@ def run(state, now):
 
     for sym, ticker in PAIRS.items():
         try:
-            d1 = dl(ticker, "1d", "1y")
-            h1 = dl(ticker, "1h", "60d")
+            h1 = dl(ticker, "1h", H1_PERIOD if TV_SESSION else "60d")
+            d1 = None if h1 is None else (resample_tv(h1, "1D") if TV_SESSION
+                                          else dl(ticker, "1d", "1y"))
             if d1 is None or h1 is None:
                 print("Ma'lumot yo'q:", sym)
                 mark_data(state, sym, False)
                 continue
-            d1c, d1f = split_d1(d1, now)
+            if TV_SESSION:
+                d1c, d1f = split_intraday(d1, pd.Timedelta(days=1), now)
+            else:
+                d1c, d1f = split_d1(d1, now)
             h4c, h4f = split_intraday(to_h4(h1), pd.Timedelta(hours=4), now)
             h1c, _ = split_intraday(h1, pd.Timedelta(hours=1), now)
             if len(d1c) < 40 or len(h4c) < 30:
@@ -762,8 +784,10 @@ def run(state, now):
                     if star:
                         msg += (f"\n{star_tf} {star['what']} ichida: "
                                 f"{fmt(sym, star['lo'])} - {fmt(sym, star['hi'])}")
-                    if TREND_FILTER and trend:
+                    if trend:
                         msg += f"\nD1 trend: {trend.upper()}"
+                        if (trend == "buy") != (z["kind"] == "bull"):
+                            msg += " ⚠️ trendga qarshi"
                     if len(z["parts"]) > 1:
                         msg += f"\n({len(z['parts'])} ustma-ust zona birlashtirildi)"
                     if z.get("late") is not None:
@@ -813,5 +837,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-if __name__ == "__main__":
-    main()
