@@ -1,9 +1,9 @@
 """
-Swing alert v2: D1 + H4 FVG / OB zonalari.
+Swing alert v2: W1 + D1 + H4 FVG / OB zonalari.
 - Narx zonaga kirganda grafik rasmi bilan xabar
 - M30 / H1 da MSS (sham tanasi bilan struktura buzilishi) bo'lsa "TASDIQ" xabari
 - 3 kuchli yangilik (NFP, CPI, FOMC): oldindan eslatma + alertlarda ogohlantirish
-- Zona eskirishi: D1 60 kun, H4 30 kun
+- W1 (haftalik) zonalar, ustma-ust zonalar bitta xabarga birlashtiriladi, zona eskirishi yo'q
 - Kunlik heartbeat, ma'lumot uzilsa ogohlantirish
 GitHub Actions uchun: har ishga tushganda bir marta tekshiradi va tugaydi.
 """
@@ -44,16 +44,16 @@ H4_OFFSET = "0h"       # H4 sham chegarasi brokeringizga mos kelmasa: "1h", "2h"
 STATE_FILE = "state.json"
 MAX_KEYS = 2000
 
-# --- zona eskirishi (kun) ---
-ZONE_MAX_AGE_DAYS = {"D1": 60, "H4": 30}
+# Zona eskirishi YO'Q: zona faqat narx unga kirganda (yoki tana bilan buzilganda) o'chadi
 
 # --- MSS tasdig'i ---
 CONFIRM_TFS = ("H1",)                       # M30 shovqinli; ikkalasi uchun: ("M30", "H1")
-MIN_DEPTH = 0.5                             # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
+MIN_DEPTH = {"W1": 0.0, "D1": 0.5, "H4": 0.5}  # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
 STOP_BUFFER_ATR = 0.3                       # stop darajasi uchun ATR buferi
 LTF_SWING_SIDE = 2                          # kichik fractal: bir tomondan 2 sham
 LTF_LOOKBACK = 40                           # sweep dan oldin necha sham ichida swing qidiriladi
-PENDING_DAYS = {"D1": 7, "H4": 3}           # tasdiq necha kun kutiladi
+PENDING_DAYS = {"W1": 14, "D1": 7, "H4": 3}
+CATCHUP_HOURS = 6   # bot o'tkazib yuborgan teginishni shuncha soat ichida kech bo'lsa ham xabar qiladi           # tasdiq necha kun kutiladi
 
 # --- yangilik (faqat USD, High impact) ---
 NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -164,7 +164,7 @@ def dl(ticker, interval, period):
         raw.columns = raw.columns.get_level_values(0)
     df = raw[["Open", "High", "Low", "Close"]].dropna()
     df.columns = ["o", "h", "l", "c"]
-    if interval == "1d":
+    if interval in ("1d", "1wk"):
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
     else:
@@ -177,6 +177,13 @@ def dl(ticker, interval, period):
 
 def split_d1(df, now):
     is_closed = df.index < pd.Timestamp(now.date())
+    closed, forming = df[is_closed], df[~is_closed]
+    return closed, (forming.iloc[-1] if len(forming) else None)
+
+
+def split_w1(df, now):
+    """Haftalik sham dushanbadan boshlanadi, keyingi dushanbada yopiladi."""
+    is_closed = (df.index + pd.Timedelta(days=7)) <= pd.Timestamp(now.date())
     closed, forming = df[is_closed], df[~is_closed]
     return closed, (forming.iloc[-1] if len(forming) else None)
 
@@ -211,14 +218,14 @@ def find_ob(df, imp, kind):
     return None
 
 
-def find_zones(df, max_age, now):
-    """Yopilgan shamlardan FVG va OB; faqat tegilmagan va eskirmagan zonalar."""
+def find_zones(df, dur=None, now=None):
+    """Yopilgan shamlardan FVG va OB.
+    Qaytadi: hali tegilmagan zonalar + oxirgi CATCHUP_HOURS soatda yopilgan sham
+    tegib o'tgan (lekin hali buzilmagan) zonalar (late=teginish vaqti)."""
     atr = (df.h - df.l).rolling(ATR_LEN).mean()
     n = len(df)
     zones = []
     for i in range(2, n):
-        if age_days(df.index[i], now) > max_age:
-            continue
         a, c = df.iloc[i - 2], df.iloc[i]
         if c.l > a.h:
             kind, lo, hi = "bull", float(a.h), float(c.l)
@@ -231,17 +238,36 @@ def find_zones(df, max_age, now):
 
         later = df.iloc[i + 1:]
 
-        def untouched(zlo, zhi):
+        def check(zlo, zhi):
+            """('fresh', None) | ('late', vaqt) | (None, None)"""
             if later.empty:
-                return True
-            return not bool(((later.l <= zhi) & (later.h >= zlo)).any())
+                return "fresh", None
+            hit = ((later.l <= zhi) & (later.h >= zlo)).values
+            if not hit.any():
+                return "fresh", None
+            if dur is None or now is None:
+                return None, None
+            k = int(hit.argmax())
+            ft = later.index[k]
+            ft = ft.tz_localize("UTC") if ft.tzinfo is None else ft.tz_convert("UTC")
+            if ft + dur <= now - pd.Timedelta(hours=CATCHUP_HOURS):
+                return None, None          # teginish anchadan beri, xabar kerak emas
+            after = later.iloc[k:]
+            if kind == "bull" and bool((after.c < zlo).any()):
+                return None, None          # zona allaqachon buzilgan
+            if kind == "bear" and bool((after.c > zhi).any()):
+                return None, None
+            return "late", ft
 
         t = str(df.index[i])
-        if untouched(lo, hi):
-            zones.append(dict(what="FVG", kind=kind, lo=lo, hi=hi, t=t))
+        st, ft = check(lo, hi)
+        if st:
+            zones.append(dict(what="FVG", kind=kind, lo=lo, hi=hi, t=t, late=ft))
         ob = find_ob(df, i - 1, kind)
-        if ob and untouched(*ob):
-            zones.append(dict(what="OB", kind=kind, lo=ob[0], hi=ob[1], t=t))
+        if ob:
+            st, ft = check(*ob)
+            if st:
+                zones.append(dict(what="OB", kind=kind, lo=ob[0], hi=ob[1], t=t, late=ft))
     return zones
 
 
@@ -268,6 +294,31 @@ def d1_trend(df):
 
 def overlap(a, b):
     return a["lo"] <= b["hi"] and a["hi"] >= b["lo"]
+
+
+def cluster(zones):
+    """Bir yo'nalishdagi ustma-ust zonalarni bitta zonaga birlashtiradi."""
+    out = []
+    for kind in ("bull", "bear"):
+        zs = sorted([z for z in zones if z["kind"] == kind], key=lambda z: z["lo"])
+        cur = None
+        for z in zs:
+            if cur is not None and z["lo"] <= cur["hi"]:
+                cur["hi"] = max(cur["hi"], z["hi"])
+                cur["whats"].add(z["what"])
+                cur["parts"].append((z["what"], z["t"]))
+                if z.get("late") is not None and (cur["late"] is None or z["late"] < cur["late"]):
+                    cur["late"] = z["late"]
+            else:
+                if cur is not None:
+                    out.append(cur)
+                cur = dict(kind=kind, lo=z["lo"], hi=z["hi"], late=z.get("late"),
+                           whats={z["what"]}, parts=[(z["what"], z["t"])])
+        if cur is not None:
+            out.append(cur)
+    for c in out:
+        c["what"] = "+".join(w for w in ("FVG", "OB") if w in c["whats"])
+    return out
 
 
 # ---------------------- MSS (tasdiq) ----------------------
@@ -298,10 +349,11 @@ def check_mss(df, p):
     bull = p["kind"] == "bull"
     seg = df.iloc[s:]
     width = p["hi"] - p["lo"]
+    md = MIN_DEPTH.get(p.get("tf"), 0.5)
     if bull:   # narx tepadan tushadi: zonaning MIN_DEPTH qismigacha kirishi kerak
-        touch = (seg.l <= p["hi"] - MIN_DEPTH * width).values
+        touch = (seg.l <= p["hi"] - md * width).values
     else:
-        touch = (seg.h >= p["lo"] + MIN_DEPTH * width).values
+        touch = (seg.h >= p["lo"] + md * width).values
     if not touch.any():
         return None
     first = s + int(np.argmax(touch))
@@ -522,7 +574,7 @@ def since(df, t0):
     return df[df.index >= t]
 
 
-def process_pending(state, sym, ticker, now, d1c, h4c, h1c, events):
+def process_pending(state, sym, ticker, now, d1c, h4c, h1c, events, w1c=None):
     mine = [p for p in state["pending"] if p["sym"] == sym]
     if not mine:
         return
@@ -541,7 +593,9 @@ def process_pending(state, sym, ticker, now, d1c, h4c, h1c, events):
             state["pending"].remove(p)
             continue
         # zona o'z TF sida to'liq buzildimi (tana bilan narigi chegara)
-        own = d1c if p["tf"] == "D1" else h4c
+        own = {"W1": w1c, "D1": d1c}.get(p["tf"], h4c)
+        if own is None:
+            own = d1c
         s = since(own, t0)
         broken = (s.c < p["lo"]).any() if p["kind"] == "bull" else (s.c > p["hi"]).any()
         if broken:
@@ -622,6 +676,15 @@ def run(state, now):
                 mark_data(state, sym, False)
                 continue
             mark_data(state, sym, True)
+            w1c = w1f = None
+            try:
+                w1 = dl(ticker, "1wk", "5y")
+                if w1 is not None:
+                    w1c, w1f = split_w1(w1, now)
+                    if len(w1c) < 30:
+                        w1c = w1f = None
+            except Exception as e:
+                print(f"W1 xato {sym}:", repr(e))
 
             # ---- D1 trend ----
             trend = d1_trend(d1c)
@@ -634,65 +697,101 @@ def run(state, now):
                 if ok:
                     state["trend"][sym] = trend
 
-            # ---- zonalar (D1 60 kun, H4 30 kun) ----
-            zones = {"D1": find_zones(d1c, ZONE_MAX_AGE_DAYS["D1"], now),
-                     "H4": find_zones(h4c, ZONE_MAX_AGE_DAYS["H4"], now)}
-            forming = {"D1": d1f, "H4": h4f}
-            closed = {"D1": d1c, "H4": h4c}
+            # ---- zonalar (yosh bo'yicha eskirish yo'q, ustma-ust zonalar birlashtiriladi) ----
+            zones = {"W1": cluster(find_zones(w1c, pd.Timedelta(days=7), now)) if w1c is not None else [],
+                     "D1": cluster(find_zones(d1c, pd.Timedelta(days=1), now)),
+                     "H4": cluster(find_zones(h4c, pd.Timedelta(hours=4), now))}
+            forming = {"W1": w1f, "D1": d1f, "H4": h4f}
+            closed = {"W1": w1c, "D1": d1c, "H4": h4c}
+            higher = {"W1": [], "D1": ["W1"], "H4": ["W1", "D1"]}
             nw = news_near(events, now)
 
-            for tf in ("D1", "H4"):
+            # ---- diagnostika (Actions logida ko'rinadi) ----
+            for _tf in ("W1", "D1", "H4"):
+                _f = forming[_tf]
+                if _f is None:
+                    print(f"[{sym} {_tf}] shakllanayotgan sham yo'q (bozor yopiq yoki ma'lumot kechikkan); "
+                          f"zonalar={len(zones[_tf])}")
+                    continue
+                _px = float(_f.c)
+                _near = sorted(zones[_tf], key=lambda zz: 0 if zz["lo"] <= _px <= zz["hi"]
+                               else min(abs(_px - zz["lo"]), abs(_px - zz["hi"])))[:1]
+                _txt = ""
+                if _near:
+                    zz = _near[0]
+                    _txt = (f" | eng yaqin: {zz['kind']} {zz['what']} "
+                            f"{fmt(sym, zz['lo'])}-{fmt(sym, zz['hi'])}")
+                print(f"[{sym} {_tf}] sham={_f.name} narx={fmt(sym, _px)} "
+                      f"zonalar={len(zones[_tf])}{_txt}")
+
+            for tf in ("W1", "D1", "H4"):
                 f = forming[tf]
                 if f is None:
                     continue
                 price = float(f.c)
                 for z in zones[tf]:
-                    if not (f.l <= z["hi"] and f.h >= z["lo"]):
+                    if not (f.l <= z["hi"] and f.h >= z["lo"]) and z.get("late") is None:
                         continue
                     if TREND_FILTER and (trend is None or (trend == "buy") != (z["kind"] == "bull")):
+                        print(f"  O'TKAZILDI {sym} {tf} {z['kind']} {z['what']} "
+                              f"{fmt(sym, z['lo'])}-{fmt(sym, z['hi'])}: trendga qarshi (D1 trend={trend})")
                         continue
-                    key = f"{sym}|{tf}|{z['what']}|{z['kind']}|{z['t']}"
-                    if key in state["alerted"]:
+                    keys = [f"{sym}|{tf}|{w}|{z['kind']}|{t}" for w, t in z["parts"]]
+                    if all(k in state["alerted"] for k in keys):
                         continue
                     if NEWS_BLOCK and nw is not None:
+                        print(f"  O'TKAZILDI {sym} {tf}: yangilik oynasi")
                         continue
 
-                    # ⭐: H4 zona bir tomondagi D1 zonaga tegib/ichida bo'lsa
-                    star = None
-                    if tf == "H4":
-                        for zd in zones["D1"]:
+                    # ⭐: zona bir tomondagi yuqori timeframe zonasiga tegib/ichida bo'lsa
+                    star, star_tf = None, None
+                    for htf in higher[tf]:
+                        for zd in zones[htf]:
                             if zd["kind"] == z["kind"] and overlap(z, zd):
-                                star = zd
+                                star, star_tf = zd, htf
                                 break
+                        if star:
+                            break
 
                     icon = "🟢" if z["kind"] == "bull" else "🔴"
                     side = "Bullish" if z["kind"] == "bull" else "Bearish"
-                    mark = "⭐ " if star else ("🔥 " if tf == "D1" else "")
+                    mark = "⭐ " if star else {"W1": "💎 ", "D1": "🔥 "}.get(tf, "")
                     msg = (f"{mark}{icon} {sym} {tf} | {side} {z['what']} ga kirdi\n"
                            f"Zona: {fmt(sym, z['lo'])} - {fmt(sym, z['hi'])}\n"
                            f"Narx: {fmt(sym, price)}")
                     if star:
-                        msg += (f"\nD1 {star['what']} ichida: "
+                        msg += (f"\n{star_tf} {star['what']} ichida: "
                                 f"{fmt(sym, star['lo'])} - {fmt(sym, star['hi'])}")
                     if TREND_FILTER and trend:
                         msg += f"\nD1 trend: {trend.upper()}"
-                    msg += (f"\n⏳ Tasdiq: zona kamida {MIN_DEPTH * 100:.0f}% to'lgach "
-                            f"{'/'.join(CONFIRM_TFS)} da MSS kutilmoqda")
+                    if len(z["parts"]) > 1:
+                        msg += f"\n({len(z['parts'])} ustma-ust zona birlashtirildi)"
+                    if z.get("late") is not None:
+                        hrs = max((now - z["late"]).total_seconds() / 3600, 0)
+                        msg += f"\n🕒 Kech aniqlandi: zonaga ~{hrs:.0f} soat oldin kirilgan"
+                    md = MIN_DEPTH.get(tf, 0.5)
+                    if md <= 0:
+                        msg += (f"\n⏳ Tasdiq: zonaga tegishi bilan "
+                                f"{'/'.join(CONFIRM_TFS)} da MSS kutilmoqda")
+                    else:
+                        msg += (f"\n⏳ Tasdiq: zona kamida {md * 100:.0f}% to'lgach "
+                                f"{'/'.join(CONFIRM_TFS)} da MSS kutilmoqda")
                     msg += news_warn_line(nw, now)
 
                     chart = make_chart(
                         with_forming(closed[tf], f),
                         f"{sym} {tf} | {side} {z['what']}", zone=z)
                     if notify(msg, chart):
-                        state["alerted"].append(key)
+                        state["alerted"].extend(k for k in keys if k not in state["alerted"])
                         state["pending"].append(dict(
-                            key=key, sym=sym, tf=tf, what=z["what"], kind=z["kind"],
+                            key=keys[0], sym=sym, tf=tf, what=z["what"], kind=z["kind"],
                             lo=z["lo"], hi=z["hi"],
-                            t0=(now - pd.Timedelta(hours=2)).isoformat(),
+                            t0=(z["late"] if z.get("late") is not None
+                                else now - pd.Timedelta(hours=2)).isoformat(),
                             exp=(now + pd.Timedelta(days=PENDING_DAYS[tf])).isoformat()))
 
             # ---- MSS tasdig'i ----
-            process_pending(state, sym, ticker, now, d1c, h4c, h1c, events)
+            process_pending(state, sym, ticker, now, d1c, h4c, h1c, events, w1c)
         except Exception as e:
             print(f"Xato {sym}:", repr(e))
             mark_data(state, sym, False)
@@ -710,6 +809,9 @@ def main():
     finally:
         save_state(state)   # xato bo'lsa ham state yo'qolmasin (takroriy alert bo'lmasin)
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
