@@ -2,7 +2,8 @@
  "alerted": [
   "USDCAD|D1|FVG|bull|2026-09-17 00:00:00",
   "USDCAD|D1|FVG|bull|2026-09-18 00:00:00",
-  "USDJPY|D1|FVG|bear|2026-10-23 00:00:00"
+  "USDJPY|D1|FVG|bear|2026-10-23 00:00:00",
+  "USDJPY|H4|FVG|bear|2026-10-22 04:00:00+00:00"
  ],
  "trend": {
   "NAS100": "buy",
@@ -12,7 +13,19 @@
   "USDCAD": "buy",
   "USDJPY": "sell"
  },
- "pending": [],
+ "pending": [
+  {
+   "key": "USDJPY|H4|FVG|bear|2026-10-22 04:00:00+00:00",
+   "sym": "USDJPY",
+   "tf": "H4",
+   "what": "FVG",
+   "kind": "bear",
+   "lo": 157.76199340820312,
+   "hi": 158.03199768066406,
+   "t0": "2026-10-26T23:21:07.274679+00:00",
+   "exp": "2026-10-30T01:21:07.274679+00:00"
+  }
+ ],
  "fails": {
   "NAS100": 0,
   "XAUUSD": 0,
