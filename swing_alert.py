@@ -1,7 +1,7 @@
 """
 Swing alert v2: W1 + D1 + H4 FVG / OB zonalari.
 - Narx zonaga kirganda grafik rasmi bilan xabar
-- M30 / H1 da MSS (sham tanasi bilan struktura buzilishi) bo'lsa "TASDIQ" xabari
+- H1 da MSS bo'lgach (xabarsiz) displacement FVG/OB ga narx tegsa "ENTRY" xabari
 - 3 kuchli yangilik (NFP, CPI, FOMC): oldindan eslatma + alertlarda ogohlantirish
 - W1 (haftalik) zonalar, ustma-ust zonalar bitta xabarga birlashtiriladi, zona eskirishi yo'q
 - Kunlik heartbeat, ma'lumot uzilsa ogohlantirish
@@ -48,12 +48,13 @@ MAX_KEYS = 2000
 # Zona eskirishi YO'Q: zona faqat narx unga kirganda (yoki tana bilan buzilganda) o'chadi
 
 # --- MSS tasdig'i ---
-CONFIRM_TFS = ("H1",)                       # M30 shovqinli; ikkalasi uchun: ("M30", "H1")
+CONFIRM_TFS = ("H1",)  # entry faqat H1 bilan ishlaydi                      # M30 shovqinli; ikkalasi uchun: ("M30", "H1")
 MIN_DEPTH = {"W1": 0.0, "D1": 0.3, "H4": 0.3}  # zonaning kamida shuncha qismi to'lgach MSS qidiriladi (0.5 = 50%, 0 = istalgan teginish)
 STOP_BUFFER_ATR = 0.3                       # stop darajasi uchun ATR buferi
 LTF_SWING_SIDE = 2                          # kichik fractal: bir tomondan 2 sham
 LTF_LOOKBACK = 40                           # sweep dan oldin necha sham ichida swing qidiriladi
 PENDING_DAYS = {"W1": 14, "D1": 7, "H4": 3}
+ENTRY_HOURS = 48     # MSS dan keyin entry zonaga teginish necha soat kutiladi
 CATCHUP_HOURS = 24   # bot o'tkazib yuborgan teginishni shuncha soat ichida kech bo'lsa ham xabar qiladi           # tasdiq necha kun kutiladi
 
 # --- yangilik (faqat USD, High impact) ---
@@ -124,6 +125,7 @@ def load_state():
     s.setdefault("alerted", [])
     s.setdefault("trend", {})
     s.setdefault("pending", [])
+    s.setdefault("entries", [])
     s.setdefault("fails", {})
     s.setdefault("news", {})
     s.setdefault("news_sent", [])
@@ -134,6 +136,7 @@ def load_state():
 def save_state(state):
     state["alerted"] = state["alerted"][-MAX_KEYS:]
     state["pending"] = state["pending"][-100:]
+    state["entries"] = state["entries"][-100:]
     state["news_sent"] = state["news_sent"][-200:]
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=1)
@@ -563,7 +566,8 @@ def heartbeat(state, events, now):
     nxt.sort(key=lambda e: e["t"])
     msg = (f"✅ Bot ishlayapti ({local.strftime('%d.%m')})\n"
            f"D1 trend: {tr}\n"
-           f"Tasdiq kutilayotgan zonalar: {len(state['pending'])}")
+           f"MSS kutilayotgan zonalar: {len(state['pending'])}\n"
+           f"Entry kutilayotgan: {len(state['entries'])}")
     if nxt:
         msg += f"\nKeyingi yangilik: {nxt[0]['kind']} {local_str(nxt[0]['t'], True)}"
     if send(msg):
@@ -629,47 +633,125 @@ def process_pending(state, sym, ticker, now, d1c, h4c, h1c, events, w1c=None):
             res = check_mss(df, p)
             if not res:
                 continue
-            bull = p["kind"] == "bull"
-            icon = "🟢" if bull else "🔴"
-            side = "Bullish" if bull else "Bearish"
-            lvl = "yuqori" if bull else "pastki"
-            sweep_name = "Sweep low" if bull else "Sweep high"
-            width = (p["hi"] - p["lo"]) or 1e-9
+            # MSS bo'ldi: xabar YUBORILMAYDI. H1 displacement (FVG) va OB zonalari
+            # saqlanadi, narx ularga tegsa ENTRY alerti ketadi (process_entries).
+            state["pending"].remove(p)
+            zs = find_entry_zones(df, res["L"], res["m"], p["kind"])
+            if not zs:
+                print(f"  MSS {sym} {p['tf']} {p['kind']}: displacement (FVG) yo'q, entry yaratilmadi")
+                break
             atr = res["atr"] if res["atr"] == res["atr"] else 0.0   # nan -> 0
-            buf = STOP_BUFFER_ATR * atr
-            if bull:
-                depth = (p["hi"] - min(res["sweep"], p["hi"])) / width
-                far, inside = p["lo"], res["sweep"] > p["lo"]
-                st_sweep, st_zone = res["sweep"] - buf, far - buf
-            else:
-                depth = (min(res["sweep"], p["hi"]) - p["lo"]) / width
-                far, inside = p["hi"], res["sweep"] < p["hi"]
-                st_sweep, st_zone = res["sweep"] + buf, far + buf
-            depth = max(0.0, min(1.0, depth))
-
-            def atr_txt(stop):
-                return f" ({abs(res['close'] - stop) / atr:.1f} ATR)" if atr else ""
-
-            msg = (f"✅ TASDIQ | {icon} {sym} {p['tf']} {side} {p['what']}\n"
-                   f"{name} da MSS: sham tanasi {fmt(sym, res['ref'])} ({lvl} swing) ni "
-                   f"{'tepaga' if bull else 'pastga'} yopdi\n"
-                   f"Zona: {fmt(sym, p['lo'])} - {fmt(sym, p['hi'])} (to'lgan: {depth * 100:.0f}%)\n"
-                   f"{sweep_name}: {fmt(sym, res['sweep'])}\n"
-                   f"Yopilish: {fmt(sym, res['close'])}\n"
-                   f"Stop (sweep ortida): {fmt(sym, st_sweep)}{atr_txt(st_sweep)}\n"
-                   f"Stop (zona ortida): {fmt(sym, st_zone)}{atr_txt(st_zone)}")
-            if inside:
-                msg += "\n⚠️ Sweep zona ichida: zona to'liq to'lmagan, sweep stopi tez olinishi mumkin"
-            msg += news_warn_line(news_near(events, now), now)
-            chart = make_chart(
-                df.iloc[:res["m"] + 1 + 3] if res["m"] + 4 <= len(df) else df,
-                f"{sym} {name} | MSS tasdiq | {side} {p['what']} ({p['tf']})",
-                zone=p,
-                hlines=[(res["ref"], "MSS", "#f0b90b")],
-                mark=(res["ts"], "MSS"))
-            if notify(msg, chart):
-                state["pending"].remove(p)
+            state["entries"].append(dict(
+                sym=sym, tf=p["tf"], what=p["what"], kind=p["kind"],
+                ts=pd.Timestamp(res["ts"]).isoformat(),
+                ref=res["ref"], sweep=res["sweep"], atr=atr,
+                zones=[dict(lo=float(z["lo"]), hi=float(z["hi"]), what=z["what"]) for z in zs],
+                exp=(now + pd.Timedelta(hours=ENTRY_HOURS)).isoformat()))
+            print(f"  MSS {sym} {p['tf']} {p['kind']}: entry zonalar={len(zs)}")
             break
+
+
+# ---------------------- Entry (MSS dan keyin FVG/OB ga teginish) ----------------------
+def find_entry_zones(df, L, m, kind):
+    """MSS impulsi (sweep L dan MSS shami m gacha) ichidagi H1 FVG lar va OB lar.
+    FVG bo'lmasa displacement yo'q deb hisoblanadi -> bo'sh ro'yxat.
+    Ustma-ust FVG/OB lar bitta zonaga birlashtiriladi."""
+    bull = kind == "bull"
+    fvgs, obs, seen = [], [], set()
+    for i in range(L + 2, m + 1):
+        a, c = df.iloc[i - 2], df.iloc[i]
+        if bull and c.l > a.h:
+            lo, hi = float(a.h), float(c.l)
+        elif (not bull) and c.h < a.l:
+            lo, hi = float(c.h), float(a.l)
+        else:
+            continue
+        fvgs.append(dict(what="FVG", kind=kind, lo=lo, hi=hi, t=str(df.index[i])))
+        for j in range(i - 2, max(L, i - 1 - OB_SEARCH) - 1, -1):
+            r = df.iloc[j]
+            if (bull and r.c < r.o) or ((not bull) and r.c > r.o):
+                key = (float(r.l), float(r.h))
+                if key not in seen:
+                    seen.add(key)
+                    obs.append(dict(what="OB", kind=kind, lo=key[0], hi=key[1],
+                                    t=str(df.index[j])))
+                break
+    if not fvgs:
+        return []
+    return cluster(fvgs + obs)
+
+
+def process_entries(state, sym, now, h1c, h1f, events):
+    mine = [e for e in state["entries"] if e["sym"] == sym]
+    if not mine:
+        return
+    all_ = with_forming(h1c, h1f)
+    forming_ts = h1f.name if h1f is not None else None
+    for e in mine:
+        if now > pd.Timestamp(e["exp"]):
+            state["entries"].remove(e)
+            continue
+        ts = pd.Timestamp(e["ts"])
+        seg = all_[all_.index > ts]
+        if seg.empty:
+            continue
+        bull = e["kind"] == "bull"
+        alive = list(range(len(e["zones"])))
+        fired, dead = None, False
+        for ri in range(len(seg)):
+            row = seg.iloc[ri]
+            t_row = seg.index[ri]
+            is_closed = forming_ts is None or t_row != forming_ts
+            c = float(row.c)
+            if is_closed and ((bull and c < e["sweep"]) or ((not bull) and c > e["sweep"])):
+                dead = True          # sweep tana bilan buzildi: setup bekor
+                break
+            for zi in list(alive):
+                z = e["zones"][zi]
+                touch = float(row.l) <= z["hi"] and float(row.h) >= z["lo"]
+                broke = is_closed and ((bull and c < z["lo"]) or ((not bull) and c > z["hi"]))
+                if broke:
+                    alive.remove(zi)
+                elif touch:
+                    fired = (z, t_row)
+                    break
+            if fired or not alive:
+                break
+        if not fired:
+            if dead or not alive:
+                state["entries"].remove(e)
+            continue
+
+        z, t_touch = fired
+        icon = "🟢" if bull else "🔴"
+        side = "Bullish" if bull else "Bearish"
+        price = float(all_.c.iloc[-1])
+        atr = e.get("atr") or 0.0
+        buf = STOP_BUFFER_ATR * atr
+        if bull:
+            st_sweep, st_zone = e["sweep"] - buf, z["lo"] - buf
+        else:
+            st_sweep, st_zone = e["sweep"] + buf, z["hi"] + buf
+
+        def atr_txt(stop):
+            return f" ({abs(price - stop) / atr:.1f} ATR)" if atr else ""
+
+        msg = (f"🎯 ENTRY | {icon} {sym} H1 {side} {z['what']} ga kirdi\n"
+               f"Setup: {e['tf']} {e['what']} zonasi + H1 MSS\n"
+               f"Entry zona: {fmt(sym, z['lo'])} - {fmt(sym, z['hi'])}\n"
+               f"Narx: {fmt(sym, price)}\n"
+               f"MSS darajasi: {fmt(sym, e['ref'])}\n"
+               f"{'Sweep low' if bull else 'Sweep high'}: {fmt(sym, e['sweep'])}\n"
+               f"Stop (sweep ortida): {fmt(sym, st_sweep)}{atr_txt(st_sweep)}\n"
+               f"Stop (zona ortida): {fmt(sym, st_zone)}{atr_txt(st_zone)}\n"
+               f"Teginish: {local_str(t_touch, True)} (Toshkent)")
+        msg += news_warn_line(news_near(events, now), now)
+        chart = make_chart(
+            all_, f"{sym} H1 | ENTRY | {side} {z['what']}", zone=dict(z, kind=e["kind"]),
+            hlines=[(e["ref"], "MSS", "#f0b90b"), (e["sweep"], "Sweep", "#8b949e")],
+            mark=(t_touch, "ENTRY"))
+        if notify(msg, chart):
+            state["entries"].remove(e)
 
 
 # ---------------------- Asosiy ----------------------
@@ -692,7 +774,7 @@ def run(state, now):
             else:
                 d1c, d1f = split_d1(d1, now)
             h4c, h4f = split_intraday(to_h4(h1), pd.Timedelta(hours=4), now)
-            h1c, _ = split_intraday(h1, pd.Timedelta(hours=1), now)
+            h1c, h1f = split_intraday(h1, pd.Timedelta(hours=1), now)
             if len(d1c) < 40 or len(h4c) < 30:
                 print("Ma'lumot yetarli emas:", sym)
                 mark_data(state, sym, False)
@@ -816,6 +898,7 @@ def run(state, now):
 
             # ---- MSS tasdig'i ----
             process_pending(state, sym, ticker, now, d1c, h4c, h1c, events, w1c)
+            process_entries(state, sym, now, h1c, h1f, events)
         except Exception as e:
             print(f"Xato {sym}:", repr(e))
             mark_data(state, sym, False)
