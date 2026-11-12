@@ -207,11 +207,14 @@
   "NAS100|H4|OB|bull|2026-11-11 02:00:00+00:00",
   "NAS100|H4|FVG|bull|2026-11-11 02:00:00+00:00",
   "GBPUSD|H4|OB|bull|2026-10-15 01:00:00+00:00",
-  "GBPUSD|H4|FVG|bull|2026-10-15 01:00:00+00:00"
+  "GBPUSD|H4|FVG|bull|2026-10-15 01:00:00+00:00",
+  "NAS100|EQ|sell|30178.000000|26366.500000",
+  "XAUUSD|EQ|buy|3879.300049|4157.700195",
+  "GBPUSD|EQ|buy|1.327404|1.350257"
  ],
  "trend": {
   "NAS100": "sell",
-  "XAUUSD": "sell",
+  "XAUUSD": "buy",
   "EURUSD": "sell",
   "GBPUSD": "buy",
   "USDCAD": "buy",
