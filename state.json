@@ -210,28 +210,19 @@
   "GBPUSD|H4|FVG|bull|2026-10-15 01:00:00+00:00",
   "NAS100|EQ|sell|30178.000000|26366.500000",
   "XAUUSD|EQ|buy|3879.300049|4157.700195",
-  "GBPUSD|EQ|buy|1.327404|1.350257"
+  "GBPUSD|EQ|buy|1.327404|1.350257",
+  "EURUSD|H4|FVG|bear|2026-11-12 18:00:00+00:00",
+  "EURUSD|H4|OB|bear|2026-11-12 18:00:00+00:00"
  ],
  "trend": {
   "NAS100": "sell",
   "XAUUSD": "buy",
   "EURUSD": "sell",
-  "GBPUSD": "buy",
+  "GBPUSD": "sell",
   "USDCAD": "buy",
   "USDJPY": "buy"
  },
  "pending": [
-  {
-   "key": "XAUUSD|D1|OB|bull|2026-11-04 22:00:00+00:00",
-   "sym": "XAUUSD",
-   "tf": "D1",
-   "what": "FVG+OB",
-   "kind": "bull",
-   "lo": 3904.10009765625,
-   "hi": 4067.0,
-   "t0": "2026-11-05T23:40:59.670905+00:00",
-   "exp": "2026-11-13T01:40:59.670905+00:00"
-  },
   {
    "key": "GBPUSD|H4|OB|bear|2026-11-06 06:00:00+00:00",
    "sym": "GBPUSD",
